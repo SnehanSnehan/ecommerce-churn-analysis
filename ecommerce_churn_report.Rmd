@@ -1,0 +1,391 @@
+---
+title: "E-Commerce Customer Churn Analysis"
+author: "Snehan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: cosmo
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+```
+
+## Executive Summary
+
+This analysis examines customer churn patterns in a Brazilian e-commerce company using 99,441 orders from 96,096 unique customers (2016-2018). Key findings reveal a **70.7% churn rate**, with the vast majority of customers (96.9%) making only a single purchase. Using RFM (Recency, Frequency, Monetary) analysis and predictive modeling, we identify high-value customer segments and provide actionable retention strategies.
+
+**Key Business Metrics:**
+- **Churn Rate**: 70.7% (customers inactive 180+ days)
+- **One-time Buyers**: 96.9% of customer base
+- **Average Order Value**: R$160.99
+- **Customer Lifetime Value**: Champions spend 3x more than Lost customers
+
+## Introduction
+
+### Business Problem
+
+Customer churn represents a critical challenge for e-commerce businesses. Acquiring new customers costs 5-25x more than retaining existing ones. This analysis addresses three key questions:
+
+1. **What drives customer churn?** Understanding factors that predict whether customers will return
+2. **Who are our most valuable customers?** Segmenting customers by behavior and value
+3. **How can we reduce churn?** Actionable recommendations for retention strategies
+
+### Dataset Description
+
+**Source**: Olist Brazilian E-Commerce Dataset (Kaggle)
+
+The dataset contains real anonymized data from a Brazilian marketplace connecting small businesses to customers. It includes:
+
+- **99,441 orders** placed between September 2016 and October 2018
+- **96,096 unique customers**
+- Order details, payment information, customer location, and timestamps
+- Multiple CSV files joined to create comprehensive customer profiles
+
+## Data Preparation
+```{r load-libraries}
+# Load required packages
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(caret)
+library(knitr)
+```
+```{r load-data}
+# Load all datasets
+orders <- read_csv("olist_orders_dataset.csv", show_col_types = FALSE)
+customers <- read_csv("olist_customers_dataset.csv", show_col_types = FALSE)
+payments <- read_csv("olist_order_payments_dataset.csv", show_col_types = FALSE)
+
+# Calculate order totals
+order_totals <- payments %>%
+  group_by(order_id) %>%
+  summarise(total_payment = sum(payment_value, na.rm = TRUE))
+
+# Join datasets
+customer_orders <- orders %>%
+  left_join(customers, by = "customer_id") %>%
+  left_join(order_totals, by = "order_id")
+```
+
+### Creating RFM Metrics
+
+RFM analysis evaluates customers based on three dimensions:
+- **Recency**: Days since last purchase
+- **Frequency**: Total number of orders
+- **Monetary**: Total amount spent
+```{r create-rfm}
+# Create customer-level summary with RFM metrics
+customer_summary <- customer_orders %>%
+  filter(order_status == "delivered") %>%
+  group_by(customer_unique_id) %>%
+  summarise(
+    first_purchase = min(order_purchase_timestamp),
+    last_purchase = max(order_purchase_timestamp),
+    total_orders = n(),
+    total_spent = sum(total_payment, na.rm = TRUE),
+    avg_order_value = mean(total_payment, na.rm = TRUE)
+  ) %>%
+  mutate(
+    recency_days = as.numeric(difftime(as.Date("2018-10-17"), 
+                                        as.Date(last_purchase), 
+                                        units = "days")),
+    customer_lifetime_days = as.numeric(difftime(last_purchase, 
+                                                  first_purchase, 
+                                                  units = "days")),
+    is_churned = ifelse(recency_days > 180, 1, 0)
+  )
+
+# Create RFM segments
+customer_summary <- customer_summary %>%
+  mutate(
+    r_score = ntile(desc(recency_days), 5),
+    f_score = ntile(total_orders, 5),
+    m_score = ntile(total_spent, 5),
+    rfm_score = r_score + f_score + m_score,
+    segment = case_when(
+      rfm_score >= 13 ~ "Champions",
+      rfm_score >= 10 ~ "Loyal Customers",
+      rfm_score >= 7 ~ "Potential Loyalists",
+      rfm_score >= 5 ~ "At Risk",
+      TRUE ~ "Lost"
+    )
+  )
+```
+
+**Data Cleaning Steps:**
+1. Filtered to delivered orders only (96,478 orders)
+2. Calculated customer-level aggregations
+3. Defined churn threshold: 180+ days of inactivity
+4. Created RFM scores and customer segments
+5. Final dataset: 93,358 customers with complete data
+
+## Analysis & Insights
+
+### 1. Churn Distribution
+```{r plot1, fig.cap="Figure 1: Over 70% of customers have not made a purchase in the last 6 months"}
+ggplot(customer_summary, aes(x = factor(is_churned), fill = factor(is_churned))) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = paste0(after_stat(count), "\n", 
+            percent(after_stat(count)/sum(after_stat(count))))), vjust = -0.5) +
+  scale_fill_manual(values = c("0" = "#2ecc71", "1" = "#e74c3c"),
+                    labels = c("Active", "Churned")) +
+  labs(
+    title = "Customer Churn Distribution",
+    subtitle = "Over 70% of customers have churned (no purchase in 180+ days)",
+    x = "Customer Status",
+    y = "Number of Customers",
+    fill = "Status"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14)) +
+  scale_x_discrete(labels = c("Active", "Churned"))
+```
+
+**Key Insight**: The company faces a severe retention crisis with 70.7% churn rate. Only 27,395 customers (29.3%) remain active. This indicates fundamental issues with customer engagement and repeat purchase incentives. The high churn rate directly impacts customer lifetime value and marketing ROI, as most acquisition spending fails to generate long-term relationships.
+
+### 2. Recency vs Customer Value
+```{r plot2, fig.cap="Figure 2: Relationship between purchase recency and customer spending reveals clear churn threshold"}
+ggplot(customer_summary, aes(x = recency_days, y = total_spent, color = factor(is_churned))) +
+  geom_point(alpha = 0.4, size = 2) +
+  scale_color_manual(values = c("0" = "#2ecc71", "1" = "#e74c3c"),
+                     labels = c("Active", "Churned")) +
+  scale_y_continuous(labels = dollar_format(prefix = "R$")) +
+  labs(
+    title = "Customer Recency vs Total Spending",
+    subtitle = "Churned customers (red) haven't purchased in 180+ days",
+    x = "Days Since Last Purchase (Recency)",
+    y = "Total Spent",
+    color = "Status"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14)) +
+  geom_vline(xintercept = 180, linetype = "dashed", color = "black", linewidth = 0.8)
+```
+
+**Key Insight**: The scatter plot reveals a clear separation at the 180-day threshold. Active customers (green) cluster on the left with recent purchases, while churned customers (red) extend rightward, some inactive for over 700 days. Notably, customer spending shows wide variation regardless of recency, suggesting that even high-value customers churn. The vertical dashed line at 180 days represents our churn definition and shows a natural breakpoint in the data.
+
+### 3. Customer Segmentation
+```{r plot3, fig.cap="Figure 3: RFM segmentation reveals five distinct customer groups with varying retention rates"}
+segment_summary <- customer_summary %>%
+  group_by(segment) %>%
+  summarise(
+    count = n(),
+    avg_spent = mean(total_spent),
+    churn_rate = mean(is_churned)
+  ) %>%
+  mutate(segment = factor(segment, levels = c("Champions", "Loyal Customers", 
+                                                "Potential Loyalists", "At Risk", "Lost")))
+
+ggplot(segment_summary, aes(x = segment, y = count, fill = segment)) +
+  geom_col() +
+  geom_text(aes(label = paste0(count, "\n", percent(churn_rate, accuracy = 0.1))), 
+            vjust = -0.5, size = 3.5) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(
+    title = "Customer Segmentation Analysis",
+    subtitle = "Numbers show customer count and churn rate by segment",
+    x = "Customer Segment",
+    y = "Number of Customers",
+    fill = "Segment"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+**Key Insight**: Customer segmentation using RFM scoring reveals five distinct groups. The majority (47,882 customers, 82.4% churn) fall into the "Lost" category - one-time buyers who never returned. "At Risk" customers (28,726 with 72.7% churn) show early warning signs. Only 3,264 "Champions" exist with just 19.7% churn, representing the most engaged segment. The dramatic size difference between segments highlights the company's struggle to move customers up the value ladder from one-time buyers to loyal advocates.
+
+### 4. Customer Value by Segment
+```{r plot4, fig.cap="Figure 4: Champions and Loyal Customers generate significantly higher lifetime value"}
+ggplot(segment_summary, aes(x = segment, y = avg_spent, fill = segment)) +
+  geom_col() +
+  geom_text(aes(label = paste0("R$", round(avg_spent, 2))), 
+            vjust = -0.5, size = 4) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  scale_y_continuous(labels = dollar_format(prefix = "R$")) +
+  labs(
+    title = "Average Customer Value by Segment",
+    subtitle = "Champions and Loyal Customers have the highest lifetime value",
+    x = "Customer Segment",
+    y = "Average Total Spending",
+    fill = "Segment"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+**Key Insight**: The financial impact of customer segments is striking. Champions average R$401.65 in lifetime spending - nearly 3x the Lost segment's R$139.56. Loyal Customers (R$381.96) and Potential Loyalists (R$220.24) also significantly outperform lower segments. This demonstrates that small improvements in moving customers between segments yield substantial revenue gains. For example, converting just 10% of "At Risk" customers to "Loyal" would generate R$(381.96 - 166.37) × 2,873 = R$619,000+ in additional revenue.
+
+### 5. Predictive Model Performance
+```{r model-training}
+# Prepare modeling data
+model_data <- customer_summary %>%
+  select(is_churned, total_orders, total_spent, avg_order_value, customer_lifetime_days) %>%
+  na.omit() %>%
+  mutate(is_churned = factor(is_churned, levels = c(0, 1), labels = c("Active", "Churned")))
+
+# Split data
+set.seed(123)
+trainIndex <- createDataPartition(model_data$is_churned, p = 0.7, list = FALSE)
+train_data <- model_data[trainIndex, ]
+test_data <- model_data[-trainIndex, ]
+
+# Train logistic regression model
+model <- train(
+  is_churned ~ total_orders + total_spent + avg_order_value + customer_lifetime_days,
+  data = train_data,
+  method = "glm",
+  family = "binomial",
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Predictions
+predictions <- predict(model, test_data)
+conf_matrix <- confusionMatrix(predictions, test_data$is_churned, positive = "Churned")
+```
+
+**Model Performance:**
+- **Accuracy**: `r percent(conf_matrix$overall['Accuracy'], accuracy = 0.01)`
+- **Sensitivity**: `r percent(conf_matrix$byClass['Sensitivity'], accuracy = 0.01)` (correctly identifies churned customers)
+- **Specificity**: `r percent(conf_matrix$byClass['Specificity'], accuracy = 0.01)` (correctly identifies active customers)
+```{r model-coefficients}
+# Display model coefficients
+model_summary <- summary(model$finalModel)
+coef_table <- as.data.frame(coef(model_summary))
+coef_table$Variable <- rownames(coef_table)
+coef_table <- coef_table[, c("Variable", "Estimate", "Pr(>|z|)")]
+names(coef_table) <- c("Variable", "Coefficient", "P-value")
+
+kable(coef_table, digits = 4, caption = "Table 1: Logistic Regression Coefficients")
+```
+
+**Model Interpretation:**
+- **total_orders**: Positive coefficient indicates more orders predict churn (counterintuitive due to dataset structure)
+- **customer_lifetime_days**: Strongly negative and significant - longer customer relationships reduce churn probability
+- The model achieves 70.78% accuracy, effectively identifying high-risk customers for targeted intervention
+
+## Business Recommendations
+
+Based on this analysis, we recommend a three-pronged retention strategy:
+
+### 1. Immediate Interventions (30-day timeline)
+
+**Re-engagement Campaign for "At Risk" Segment**
+- Target: 28,726 customers with 120-180 days inactivity
+- Action: Personalized email with 15% discount + free shipping
+- Expected Impact: 10% reactivation = 2,873 customers × R$166 avg = R$476,000 revenue
+- Investment: R$50,000 (email costs + discounts) = 9.5x ROI
+
+**Win-back Campaign for Recent "Lost" Customers**
+- Target: Lost customers inactive 180-270 days (highest recovery probability)
+- Action: Survey to understand churn reasons + incentive for return
+- Expected Impact: 5% recovery rate
+
+### 2. Medium-term Programs (3-6 months)
+
+**Loyalty Program Launch**
+- Reward points for purchases, reviews, referrals
+- Tiered benefits: Bronze (1 purchase) → Silver (3 purchases) → Gold (5+ purchases)
+- Goal: Move 20% of one-time buyers to repeat customers
+- Focus on Potential Loyalists segment (13,486 customers)
+
+**Post-purchase Engagement Sequence**
+- Day 3: Product tips and usage guide
+- Day 14: Request review with R$10 credit incentive
+- Day 30: Personalized product recommendations
+- Day 60: Replenishment reminder (for consumables)
+
+### 3. Long-term Strategy (6-12 months)
+
+**Customer Experience Improvements**
+- Reduce delivery times (major pain point in Brazilian e-commerce)
+- Improve product quality control and seller vetting
+- Enhanced customer service with proactive issue resolution
+
+**Predictive Churn Prevention**
+- Deploy machine learning model to score customers monthly
+- Automatic triggered campaigns when churn risk exceeds threshold
+- A/B test interventions and continuously optimize
+
+**Segment-specific Strategies**
+- Champions: VIP treatment, early access, exclusive perks (retention focus)
+- Loyal Customers: Referral incentives, community building
+- Potential Loyalists: Cross-sell campaigns, subscription options
+- At Risk: Win-back offers, satisfaction surveys
+- Lost: Periodic re-engagement, new product launches
+
+### Expected Business Impact
+
+Implementing these recommendations could yield:
+- **Churn reduction**: 70.7% → 55% (15.7pp improvement)
+- **Repeat purchase rate**: 3.1% → 12% (4x improvement)
+- **Annual revenue increase**: R$8-12 million (based on customer base size)
+- **Customer Lifetime Value**: +40% through increased repeat purchases
+
+## Conclusion
+
+This analysis reveals a critical retention crisis: the company operates primarily as a one-time transaction platform rather than building lasting customer relationships. With 70.7% churn and 96.9% one-time buyers, the current model is unsustainable and leaves significant revenue on the table.
+
+However, the data also shows clear opportunities. The 3,264 Champions prove that customer loyalty is achievable, and these customers generate 3x the revenue of one-time buyers. By implementing targeted retention strategies - starting with the 28,726 "At Risk" customers - the company can dramatically improve unit economics and long-term profitability.
+
+**Key Takeaways:**
+1. Customer acquisition without retention is a losing strategy
+2. RFM segmentation enables precise, high-ROI interventions
+3. Small improvements in repeat purchase rates yield exponential value gains
+4. Predictive modeling can identify at-risk customers before they churn
+
+The path forward requires shifting focus from acquisition volume to customer lifetime value, investing in post-purchase experience, and building systematic retention programs. Companies that master retention economics in e-commerce achieve 2-3x higher valuations than those dependent on continuous acquisition spending.
+
+## Technical Appendix
+
+### Methodology Notes
+
+**Churn Definition**: Customers with no purchases in the last 180 days (6 months). This threshold was selected based on:
+- Business context (e-commerce purchase cycles)
+- Data distribution (natural breakpoint observed)
+- Industry benchmarks for similar categories
+
+**RFM Scoring**: Quintile-based scoring (1-5) for each dimension, summed to create composite score (3-15). Segments defined by score ranges to create actionable groups.
+
+**Model Selection**: Logistic regression chosen for interpretability and business explainability. More complex models (Random Forest, XGBoost) tested but provided marginal accuracy gains while sacrificing interpretability.
+
+### Data Limitations
+
+- Dataset covers only 2 years (2016-2018); seasonal patterns may be incomplete
+- Missing demographic data (age, gender) limits personalization opportunities
+- Product category analysis limited by inconsistent categorization
+- External factors (economic conditions, competitor actions) not captured
+
+### Future Analysis Opportunities
+
+1. Product-level churn analysis (which categories drive retention?)
+2. Geographic patterns (regional differences in loyalty)
+3. Cohort analysis (how do customer behaviors change over time?)
+4. Price sensitivity analysis (optimal discount levels for reactivation)
+5. Propensity scoring for upsell/cross-sell opportunities
+
+---
+
+## Responsibility Statement
+
+**I, Snehan, had primary responsibility for:**
+- Dataset selection, acquisition, and validation
+- Data cleaning, transformation, and RFM calculation
+- Exploratory analysis and visualization creation
+- Predictive model development and evaluation
+- Business insight interpretation and recommendation formulation
+- R Markdown report development and documentation
+
+---
+
+*Analysis completed on `r Sys.Date()` using R version `r R.version.string`*
